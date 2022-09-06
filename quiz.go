@@ -3,57 +3,76 @@ package main
 import (
 	"bufio"
 	"encoding/csv"
-	"flag"
+	"log"
+
 	"fmt"
 	"os"
+	"time"
+
+	"github.com/spf13/cobra"
 
 	. "github.com/jdejoya17/quiz/util"
 	lg "github.com/jdejoya17/quiz/util/logger"
 )
 
 type QuizResults struct {
-	total int
-	score int
+	total     int
+	score     int
+	completed chan bool
 }
 
 // global variable
 type Global struct {
-	problems   string
-	time_limit int
+	problems     string
+	time_limit   int
+	quiz_results QuizResults
 }
 
 var g Global
 
-func init() {
-	lg.Info.Println("initializing")
+// flag definitions
+var (
+	rootCmd = &cobra.Command{
+		Use:   "quiz",
+		Short: "Runs a timed quiz",
+		Long: `Runs a timed quiz. The problems are read from
+an input file.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("Run a Quiz!!!")
+		},
+	}
+)
 
-	// long flag name
-	flag.StringVar(
+func init() {
+	rootCmd.PersistentFlags().StringVarP(
 		&g.problems,
 		"problems",
-		"problems.csv",
-		"CSV file containing a list of problems and answers",
-	)
-	// short flag name
-	flag.StringVar(
-		&g.problems,
 		"p",
 		"problems.csv",
-		"CSV file containing a list of problems and answers",
+		"csv file containing a list of problems and asnwers",
 	)
 
-	// long flag name
-	flag.IntVar(
+	rootCmd.PersistentFlags().IntVarP(
 		&g.time_limit,
-		"timelimit",
-		2,
-		"Time limit for the quiz",
+		"time_limit",
+		"t",
+		30,
+		"time limit of the quiz",
 	)
+
+	helpFunc := rootCmd.HelpFunc()
+	rootCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		helpFunc(rootCmd, []string{})
+		os.Exit(0)
+	})
 }
 
 func main() {
 	// parse cmdline arguments
-	flag.Parse()
+	if err := rootCmd.Execute(); err != nil {
+		log.Fatal(err)
+	}
+	// rootCmd.HelpFunc()
 
 	// open problem list from csv file
 	data, err := parseProblems()
@@ -61,19 +80,49 @@ func main() {
 		lg.Error.Println(ErrorProblemLoad)
 		ErrMsg(ErrorProblemLoad)
 	}
+	g.quiz_results = QuizResults{
+		total:     len(data),
+		score:     0,
+		completed: make(chan bool),
+	}
+
+	// start quiz timer
+	fmt.Printf("Press Enter Key to start quiz\n")
+	fmt.Printf("Time Limit: %v\n", g.time_limit)
+	fmt.Scanln()
+	tmr := time.NewTimer(
+		time.Duration(g.time_limit * int(time.Second)),
+	)
 
 	// start quiz
-	results, err := startQuiz(data)
-	if err != nil {
-		lg.Error.Println(ErrorScanAnswer)
-		ErrMsg(ErrorScanAnswer)
+	go func() {
+		err := startQuiz(data)
+		if err != nil {
+			lg.Error.Println(ErrorScanAnswer)
+			ErrMsg(ErrorScanAnswer)
+		}
+	}()
+
+	// wait for timer
+	for {
+		select {
+		case <-tmr.C:
+			fmt.Println("Time is up!!")
+			close(g.quiz_results.completed)
+			goto end_quiz
+		case <-g.quiz_results.completed:
+			fmt.Println("Quiz complete!!")
+			tmr.Stop()
+			goto end_quiz
+		}
 	}
+end_quiz:
 
 	// tally results
 	fmt.Printf("------------------\n")
 	fmt.Printf("RESULTS:\n")
-	fmt.Printf("Total: %v\n", results.total)
-	fmt.Printf("Score: %v\n", results.score)
+	fmt.Printf("Total: %v\n", g.quiz_results.total)
+	fmt.Printf("Score: %v\n", g.quiz_results.score)
 }
 
 func parseProblems() (data [][]string, err error) {
@@ -96,10 +145,9 @@ func parseProblems() (data [][]string, err error) {
 	return data, err
 }
 
-func startQuiz(problems [][]string) (QuizResults, error) {
+func startQuiz(problems [][]string) error {
 	scanner := bufio.NewScanner(os.Stdin)
 	var problem, answer, userAnswer string
-	results := QuizResults{total: len(problems), score: 0}
 	for _, val := range problems {
 		problem, answer = val[0], val[1]
 
@@ -109,17 +157,18 @@ func startQuiz(problems [][]string) (QuizResults, error) {
 		scanner.Scan()
 		if err := scanner.Err(); err != nil {
 			lg.Error.Println(err)
-			return results, err
+			return err
 		} else {
 			userAnswer = scanner.Text()
 		}
 
 		// validate answer
 		if answer == userAnswer {
-			results.score += 1
+			g.quiz_results.score += 1
 		}
 		fmt.Printf("\n")
 	}
 
-	return results, nil
+	g.quiz_results.completed <- true
+	return nil
 }
